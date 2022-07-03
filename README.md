@@ -1,4 +1,4 @@
-# Mynote
+# My note
 My own repository of academic knowledge.
 
 The main context include:
