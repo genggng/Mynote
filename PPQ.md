@@ -73,5 +73,47 @@ PASSIVE_BAKED = 11 # 被动量化且静态量化，当前config不生效，数�
 FP32     = 12  # 表示这一路输入直接为FP32浮点数
 ```
 
+## 神经网络量化硬件实现
 
+- 硬件上round取整函数一般有5种,主要是遇到.5时如何处理，小于.5向下取整，大于.5向上取整：
+  - Round half to even: 向偶数取整 round(1.5) = 2  round(2.5) = 2  round(-0.5) = 0
+  - Round half away from zero: 向零取整 round(2.5) = 2    round(-2.5)=-2
+  - Round half toward zero: 反向零取整 round(2.5) = 3  round(-2.5) = -3
+  - Round half down:  向下取整  round(2.5) = 2   round(-2.5) = -3
+  - Round half up:  向上取整  round(2.5) = 3  round(-2.5) = -2
+
+- 网络中部分算子可能不能量化，如果在中间插入**反量化解量化**进行单独的FP32推理，可能会比完全的FP32网络要更慢。尽量保证网络中的所有算子都是能够量化的。
+
+####  对称量化
+
+原始的FP32和量化后的INT8范围都是对称的，不需要零点，但是INT8范围中的-128会浪费。
+
+```c++
+float value = 1.0; // 待量化浮点值 
+float scale = 0.1;  //尺度因子
+int qt32 = round_fn(value/scale);  //截断前的量化值，round_fn为round函数
+char qt8 = clip(qt32,Q_MIN,Q_MAX);  // 量化值，Q_MIN=-127 Q_MAX=127
+```
+
+#### 非对称量化
+
+但是考虑到relu函数后的feature只可能是正数，这就浪费了很大的空间。可以对relu激活值可以采用非对称量化，INT8范围只采用正数。方法就是对应原来的对称量化，在尺度放缩后加上一个偏移量（零点），将整数值都便宜到正数区间。
+
+```c++
+float value = 1.0; // 待量化浮点值 
+float scale = 0.1;  //尺度因子
+int qt32 = round_fn(value/scale + zero_point);  //截断前的量化值，round_fn为round函数,zero_point为偏移零点
+unsigned char qt8 = clip(qt32,Q_MIN,Q_MAX);  // 量化值 Q_MIN=0 Q_MAX=255
+```
+
+#### 整数量化
+
+一些设备上不支持浮点除法，因此上面方式的qt32就无法计算。因此使用位移运算代替，但显然就只能进行2的倍数的乘除。
+
+```c++
+float value = 1.0; // 待量化浮点值 
+int shift = 1;  //定点位
+int qt32 = round_fn(value<<shfit);  //截断前的量化值，round_fn为round函数
+char qt8 = clip(qt32,Q_MIN,Q_MAX);  // 量化值，Q_MIN=-127 Q_MAX=127
+```
 
