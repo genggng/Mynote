@@ -72,6 +72,19 @@ export PATH=/home/geng/bin/:$PATH
 
 
 
+## 安装ONNXRuntime
+
+使用pip直接安装onnxruntime只能使用cpu推理，速度太慢。这里安装能够使用CUDA的版本。
+
+```shell
+pip install onnxruntime   #只支持cpu
+pip install onnxruntime-gpu  #支持gpu，两个版本都要下载
+```
+
+
+
+
+
 ## 安装配置Openvino
 
 openvino是英特尔面向inel处理器（x86 cpu）和显卡的神经网络推理引擎，并且只支持酷睿6代以上或者至强处理器。
