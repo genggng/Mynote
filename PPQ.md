@@ -97,7 +97,7 @@ char qt8 = clip(qt32,Q_MIN,Q_MAX);  // 量化值，Q_MIN=-127 Q_MAX=127
 
 #### 非对称量化
 
-但是考虑到relu函数后的feature只可能是正数，这就浪费了很大的空间。可以对relu激活值可以采用非对称量化，INT8范围只采用正数。方法就是对应原来的对称量化，在尺度放缩后加上一个偏移量（零点），将整数值都便宜到正数区间。
+但是考虑到relu函数后的feature只可能是正数，这就浪费了很大的空间。可以对relu激活值可以采用非对称量化，INT8范围只采用正数。方法就是对应原来的对称量化，在尺度放缩后加上一个偏移量（零点），将整数值都偏移到正数区间。
 
 ```c++
 float value = 1.0; // 待量化浮点值 
@@ -258,12 +258,91 @@ output[i+k][j+0] = Clip(round((packedA[0]*packedB[0] + bias[i+k])*S_a*S_b/S_c)))
 
 - **激活函数融合**
 
-  
+  将常见的**计算算子**和常见的**激活函数**进行融合
+
+  > 计算算子（矩阵乘法）：Conv，ConvTranpose，Gemm
+  >
+  > 激活函数：Relu, Clip(Relu6), PRelu, Tanh, Sigmoid, Swish
+
+  实现的方法很简单，就是在将计算算子（函数）和激活函数放在一起，这样就都在寄存器中运行，不用频繁访问内存。
+
+  ```c++
+  output[i][j] = activation_fn(accumulator + bias[j])
+  ```
 
 - **移除BN层和Dropout**
 
+  可以将计算算子和BN层融合，直接把计算算子的输入结果带入BN层，合并成新的卷积运算。
+
+  卷积层的输出如下所示:  
+  $$
+  y=\sum_{i}^{N} w_{i} x_{i}+b
+  $$
+  BN层的输出如下所示:  
+  $$
+  y_{bn} =\gamma \frac{y-\mu_{y}}{\sqrt{\sigma_{y}^{2}+\epsilon}}+\beta
+  $$
+  将卷积层的输出$y$带入到BN层中得到：  
+  $$
+  y_{b n}=\frac{\gamma}{\sqrt{\sigma_{y}^{2}+\epsilon}}\left(\sum_{i}^{N} w_{i} x_{i}+b-\mu_{y}\right)+\beta
+  $$
+  仔细观察，当训练结束后，BN层统计量$\mu_{y}$ ,$\sigma_{y}$以及参数$\gamma$, $\beta$都已经固定下来。我们可以令$\gamma^{\prime}=\frac{\gamma}{\sqrt{\sigma_{y}^{2}+\epsilon}}$,那么能够得到：
+  $$
+  y_{b n}=\sum_{i}^{N} \gamma^{\prime} w_{i} x_{i}+\gamma^{\prime}\left(b-\mu_{y}\right)+\beta
+  $$
+  
+
+  上式已经和卷积计算公式非常像了，为了看得更清楚，我们令$w_{i}^{\prime} = \gamma^{\prime}w_{i}$,  $b^{\prime}=\gamma^{\prime}\left(b-\mu_{y}\right)+\beta$,得到最终的BN层输出
+  $$
+  y_{bn}=\sum_{i}^{N} w_{i} x_{i}^{\prime}+b^{\prime}
+  $$
+  **这就和卷积的操作一模一样，因此我们可以把BN层折叠合并到卷积层中。先进行数值变换，在进行矩阵运算。**
+
 - **常量折叠**
+
+  多个相邻的算子可以用一个算子来代替，一个典型的例子就是网络中存在两个$Add_1$操作，其中$Add_1:Y=X+1$ , 那么两个连续的$Add_1$就可以用一个新算子 $Add_2:Y=X+2$ 来替换。
 
 - **矩阵乘融合**
 
+  两个**相邻的计算算子**，中间没有激活函数之类的东西，那么就可以融合。  
+  $$
+  \textbf{计算算子1}:Y=W_1X+B_1
+  $$
+
+  $$
+  \textbf{计算算子2}:Y^{'}=W_2Y+B_2
+  $$
+
+  $$
+  \text{融合后}: Y^{'}=W_2W_1X+(W_2B_1+B_2)
+  $$
+
+  这其实也是激活函数存在的意义，如果没有激活函数，无论多少个权重矩阵都相当于一个，无论多少层的神经网络都相当于一层网络。
+
 - **Conv-Add融合**
+
+  卷积的输出$Y_1$与任意其他的一个输出$Y_2$进行Add运算时，可以直接把Add运算合并到Conv中。能够节省Add算子的访存。
+  $$
+  Conv: Y_1=W_1X_1+B_1\\
+  Any:Y_2\\
+  Add:Y=Y_1+Y_2\\
+  \text{融合后}:Y=W_1X_1+(Y_2+B_1)
+  $$
+
+#### 常见计算图优化
+
+使用上面的准则，对下面的计算图进行优化：
+
+![计算图优化](C:\Users\耿耿的笔记本\OneDrive - bupt.edu.cn\academic\code\Mynote\images\graph_optimization.png)
+
+优化后，从10个算子优化到4个算子。
+
+- cast算子是做数据类型转换，比如tensor.float()
+- pad算子可以融合到conv中。
+
+#### 联合定点
+
+上面介绍的图融合方法，得到的算子并不能用onnx表示，因此只能在到达具体的后端才能实现算子的融合。但是我们**不应该使用算子未融合前的计算图进行量化**，这就产生了一个矛盾。
+
+PPQ为了支持多种后端，使用**TensorQuantizationConfig**
+
